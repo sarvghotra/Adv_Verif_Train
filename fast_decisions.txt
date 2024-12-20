@@ -1,0 +1,9 @@
+# FIXME: fast decisions
+
+1. Haven't included GSM8k training data (+ pos examples) in the generated data
+2. Ignored deduplication based on the fuzzy match. Found onl ~5% duplicates.
+
+
+## Data generation
+
+### Llama8bInstruct gen for 6832 prompts out of ~7.5K. For now, we move on with 6832 prompts.

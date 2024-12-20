@@ -1,0 +1,11 @@
+{
+    "bf16": {
+        "enabled": "auto"
+    },
+    "zero_optimization": {
+        "stage": 2,
+        "offload_optimizer": {
+            "device": null
+        }
+    }
+}

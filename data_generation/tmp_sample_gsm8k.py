@@ -1,6 +1,7 @@
 import os
 import sys
-
+import random
+import numpy as np
 import argparse
 import torch
 import transformers
@@ -12,7 +13,6 @@ from typing import Optional, Dict, Sequence, List
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import json
-
 from tqdm import tqdm
 import copy
 from torch.cuda.amp import autocast
@@ -37,7 +37,60 @@ PROMPT_DICT = {
         "Write a response that appropriately completes the request.\n\n"
         "### Instruction:\n{text}\n\n### Response:"
     ),
+    "prompt_metamath_mistral7b": (
+        "Below is an instruction that describes a task. " 
+        "Write a response that appropriately completes the request.\n\n"
+        "### Instruction:\n{question}\n\n### Response: Let's think step by step."
+    )
 }
+
+
+import re
+from fractions import Fraction
+
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        pass
+    try:
+        import unicodedata
+        unicodedata.numeric(s)
+        return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
+def extract_answer_from_response(completion, delimiter):
+    text = completion.split(delimiter)
+    if len(text) > 1:
+        extract_ans = text[-1].strip()
+        match = re.search(r'[\-+]?\d*[\.,/]?\d+', extract_ans)
+        if match:
+            if '/' in match.group():
+                denominator = match.group().split('/')[1]
+                numerator = match.group().split('/')[0]
+                if is_number(denominator) and is_number(numerator):
+                    if denominator == '0':
+                        return round(float(numerator.replace(',', '')))
+                    else:
+                        frac = Fraction(match.group().replace(',', ''))
+                        num_numerator = frac.numerator
+                        num_denominator = frac.denominator
+                        return round(float(num_numerator / num_denominator))
+                else:
+                    return None
+            else:
+                if float(match.group().replace(',', '')) == float('inf'):
+                    return None
+                return round(float(match.group().replace(',', '')))
+        else:
+            return None
+    else:
+        return None
+
 
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict: Dict,
@@ -64,6 +117,11 @@ def smart_tokenizer_and_embedding_resize(
 
 def _tokenize_fn(strings, tokenizer: transformers.PreTrainedTokenizer):
     """Tokenize a list of strings."""
+
+    # quick fix for the tokenizer.model_max_length issue
+    if tokenizer.model_max_length > 1000000000000000019:
+        tokenizer.model_max_length = 1024
+
     tokenized_list = [
         tokenizer(
             text,
@@ -93,7 +151,10 @@ def preprocess(
 ):
     sources_tokenized = _tokenize_fn(sources, tokenizer)
     input_ids = sources_tokenized["input_ids"]
-    return dict(input_ids=input_ids, labels=copy.deepcopy(input_ids))
+
+    final_answers = [int(extract_answer_from_response(t)) for t in targets]
+
+    return dict(input_ids=input_ids, labels=copy.deepcopy(input_ids)), final_answers
 
 
 class SupervisedDataset(Dataset):
@@ -108,43 +169,53 @@ class SupervisedDataset(Dataset):
             dataset_for_eval = f.readlines()
 
         dataset_for_eval = [json.loads(item.strip()) for item in dataset_for_eval]
-        try:
-            sources = [PROMPT_DICT["prompt_no_input"].format_map(item)for item in dataset_for_eval]
-        except:
-            sources = [PROMPT_DICT["prompt_no_input_v2"].format_map(item)for item in dataset_for_eval]
+        inputs = [PROMPT_DICT["prompt_metamath_mistral7b"].format_map(item) for item in dataset_for_eval]
+        # try:
+        #     sources = [PROMPT_DICT["prompt_no_input"].format_map(item)for item in dataset_for_eval]
+        # except:
+        #     sources = [PROMPT_DICT["prompt_no_input_v2"].format_map(item)for item in dataset_for_eval]
+
+        # inputs = [item['question'] for item in dataset_for_eval]
+
         try:
             targets = [item['answer'] for item in dataset_for_eval]
         except:
             targets = [item['response'] for item in dataset_for_eval]
         
-        data_dict = preprocess(sources, targets, tokenizer)
+        # final_answers = [int(extract_answer_from_response(t, delimiter='#### ')) for t in targets]
+        final_answers = [t.split('#### ')[1] for t in targets]
+        final_answers = [int(t.replace(',', '')) for t in final_answers]
+        # data_dict, final_answers = preprocess(sources, targets, tokenizer)
 
         # print("input_ids: ", data_dict['input_ids'])
 
-        self.input_ids = data_dict["input_ids"] # + data_dict["input_ids"][-100:]
-        self.labels = data_dict["labels"] # + data_dict["labels"][-100:]
+        # self.input_ids = data_dict["input_ids"] # + data_dict["input_ids"][-100:]
+        # self.labels = data_dict["labels"] # + data_dict["labels"][-100:]
+        self.inputs = inputs
+        self.targets = final_answers
 
         # print("input_ids: ", self.input_ids)
 
     def __len__(self):
-        return len(self.input_ids)
+        return len(self.inputs)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i], labels=self.labels[i], id=i)
-
-def padding(inputs, padding_token, cutoff = None):
-    num_elems = len(inputs)
-    if cutoff is None:
-        cutoff = max([len(item) for item in inputs])
-    else:
-        cutoff = min(max([len(item) for item in inputs]), cutoff)
+        return dict(inputs=self.inputs[i], ids=i, targets=self.targets[i])
     
-    tokens = torch.ones(num_elems, cutoff).long().to(inputs[0].device) * padding_token
-    for i in range(num_elems):
-        toks = inputs[i]
-        length = min(cutoff, len(toks))
-        tokens[i, -length:] = toks[-length:]
-    return tokens
+
+# def padding(inputs, padding_token, cutoff = None):
+#     num_elems = len(inputs)
+#     if cutoff is None:
+#         cutoff = max([len(item) for item in inputs])
+#     else:
+#         cutoff = min(max([len(item) for item in inputs]), cutoff)
+    
+#     tokens = torch.ones(num_elems, cutoff).long().to(inputs[0].device) * padding_token
+#     for i in range(num_elems):
+#         toks = inputs[i]
+#         length = min(cutoff, len(toks))
+#         tokens[i, -length:] = toks[-length:]
+#     return tokens
 
 def sequence_gather(s, world_size, pad_tok_id):
     local_size = torch.tensor(s.size(), device=s.device)
@@ -161,6 +232,7 @@ def sequence_gather(s, world_size, pad_tok_id):
 
     return gathered_s
 
+
 @dataclass
 class DataCollatorForSupervisedDataset(object):
     """Collate examples for supervised fine-tuning."""
@@ -168,15 +240,26 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels, ids = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels", 'id'))
-        input_ids = padding(input_ids, self.tokenizer.pad_token_id, cutoff = 256)
-        labels = padding(labels, IGNORE_INDEX, cutoff = 256)
+        inputs, ids, targets = tuple([instance[key] for instance in instances] for key in ("inputs", "ids", "targets"))
+        
+        tokenized = self.tokenizer(inputs, 
+                                   return_tensors="pt", 
+                                   padding="longest", 
+                                   truncation=True, 
+                                   max_length=self.tokenizer.model_max_length)
+        
+        input_ids = tokenized["input_ids"]
+        labels = tokenized["input_ids"].clone()
+        
+        # input_ids = padding(input_ids, self.tokenizer.pad_token_id, cutoff = 256)
+        # labels = padding(labels, IGNORE_INDEX, cutoff = 256)
 
         return dict(
             input_ids=input_ids,
             labels=labels,
             id=torch.tensor(ids).to(input_ids.device),
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            targets=torch.tensor(targets).to(input_ids.device),
         )
 
 
@@ -187,22 +270,41 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
     return eval_dataset, data_collator
 
 
+def set_seeds(seed=42):
+    # Set the Python seed for the random module
+    random.seed(seed)
+    
+    # Set the seed for numpy
+    np.random.seed(seed)
+    
+    # Set the seed for PyTorch on CPU and GPU
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # If using multiple GPUs
+
+    # Ensure deterministic algorithms for reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def main(rank, args):
 
-
-    dist.init_process_group("nccl")
-    torch.manual_seed(args.seed)
+    # dist.init_process_group("nccl")
+    set_seeds(args.seed)
     world_size = torch.cuda.device_count()
     base_model = args.base_model
     data_path = args.data_path
     batch_size = args.batch_size
+    return_seq_num = args.return_seq_num
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
             base_model,
             torch_dtype=torch.bfloat16,
         )
-    # model.half()
-    tokenizer = transformers.AutoTokenizer.from_pretrained(base_model)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(base_model, padding_side="left", truncation_side="left")
+    # quick fix for the tokenizer.model_max_length issue
+    if tokenizer.model_max_length > 1000000000000000019:
+        tokenizer.model_max_length = 1024
 
     if tokenizer.pad_token is None:
         smart_tokenizer_and_embedding_resize(
@@ -222,110 +324,80 @@ def main(rank, args):
 
     torch.cuda.set_device(rank)
     model.to(torch.cuda.current_device())
-    model = DDP(model, device_ids=[torch.cuda.current_device()])
     model.eval()
 
-
-
     eval_dataset, data_collator = make_supervised_data_module(tokenizer, data_path)
+
     # dataset_for_eval = load_dataset(data_path)['train']
-    return_seq_num = 1
     for tempera in [0.7]:
-        sampler = torch.utils.data.distributed.DistributedSampler(eval_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        # sampler = torch.utils.data.distributed.DistributedSampler(eval_dataset, num_replicas=world_size, rank=rank, shuffle=False)
         dataloader = DataLoader(
             eval_dataset, 
             shuffle=False, 
             collate_fn=data_collator, 
             batch_size=batch_size,
-            sampler=sampler,
-            drop_last=True,
+            # sampler=sampler,
+            drop_last=False,
         )
+        stop_tokens = ["Question:", "Question", "USER:", "USER", "ASSISTANT:", \
+                       "ASSISTANT", "Instruction:", "Instruction", "Response:", "Response"]
         generation_config = GenerationConfig(
             # temperature=0.8 if args.diverse_beam > 1 else 1.0,
             temperature=tempera,
             # num_beam_groups=args.diverse_beam,
             # diversity_penalty=1.0,
+            top_p=1,
             do_sample=True,
             num_beams=return_seq_num,
-            max_new_tokens=256,
+            max_new_tokens=512,
             num_return_sequences=return_seq_num,
         )
 
         all_outputs = []
         for step, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-
-            print("step: ", step)
-
-            # if step > 10:
-            #     break
-            # print(batch.pop('id'))
-            # print(dataset_for_eval[step]['prompt'])
             input_ids = batch['input_ids'].to(model.device)
             attention_mask = batch['attention_mask'].to(model.device)
             # with autocast(dtype=torch.bfloat16):
             with torch.no_grad():
-                generation_output = model.module.generate(
+                generation_output = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     generation_config=generation_config,
                     pad_token_id=tokenizer.pad_token_id,
                     return_dict_in_generate=True,
-                    synced_gpus=True,
+                    stop_strings=stop_tokens,
+                    tokenizer=tokenizer,
+                    # synced_gpus=True,
                 )
             s = generation_output.sequences
 
-
-
-            gather_outputs = sequence_gather(s, world_size, tokenizer.pad_token_id)
-            gathered_inputs = sequence_gather(input_ids, world_size, tokenizer.pad_token_id)
-            gather_outputs = torch.stack(gather_outputs).reshape(world_size, batch_size,return_seq_num,-1)
-            gathered_inputs = torch.stack(gathered_inputs)
-            gather_outputs = gather_outputs.transpose(0,1).reshape(batch_size*world_size*return_seq_num, -1)
-            gathered_inputs = gathered_inputs.transpose(0,1).reshape(batch_size*world_size,-1)
-            # try:
-            outputs_string = tokenizer.batch_decode(gather_outputs, skip_special_tokens=True)
-            inputs_string = tokenizer.batch_decode(gathered_inputs, skip_special_tokens=True)
-
-            print("outputs_string: ", outputs_string)
-            print("inputs_string: ", inputs_string)
-            
-            # for item in range(len(gather_outputs)):
-            #     if rank ==0:
-            #         print(outputs_string[item])
-            #         print(gather_outputs[item])
-            #     input()
-
-            # except:
-            #     print(gather_outputs)
-            #     print(gather_outputs.sum(-1))
-            #     print(gather_outputs.shape)
-            #     print(torch.max(gather_outputs), torch.min(gather_outputs))
-            #     raise RuntimeError
-            # if rank == 0: 
-            #     print(inputs_string)
-            #     print('+'*10)
-            #     print(outputs_string)
+            outputs_string = tokenizer.batch_decode(s, skip_special_tokens=True)
+            inputs_string = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+            outputs_string = [item.replace('ки', '') for item in outputs_string]
+            targets = batch['targets']
             
             for idx in range(len(inputs_string)):
-                temp = []
+                gt_ans = int(targets[idx].cpu().numpy())
                 for i in range(return_seq_num):
-                    temp.append([inputs_string[idx], outputs_string[return_seq_num*idx+i].replace(inputs_string[idx], '')])
-                    # if rank ==0:
-                    #     print(temp[-1][1])
-                    # input()
-                all_outputs.append(temp)
-            # input()
+                    temp = {
+                        "query": inputs_string[idx],
+                        "response": "",
+                        "target": gt_ans
+                    }
+                    res = outputs_string[return_seq_num*idx+i].replace(inputs_string[idx], '')
+                    temp['response'] = res
+                    temp["text"] = inputs_string[idx] + res
+                    
+                    pred = extract_answer_from_response(res, 'The answer is: ')
+                    label = 1 if pred == gt_ans else 0
+                    temp["label"] = label
+                    
+                    all_outputs.append(temp)
         
-        print("all_outputs: ", all_outputs)
-
-        if rank == 0:
-            import json
-            with open(args.out_path + f'/raw_generation_{tempera}_{args.seed}.json', 'w') as f:
-                for item in all_outputs[:len(eval_dataset)]:
-                    f.write(json.dumps(item) + '\n')
-                    # json.dump(all_outputs[:len(eval_dataset)], f)
-                    print(item)
-        dist.barrier()
+        import json
+        with open(args.out_path + f'/raw_generation_{tempera}_{args.seed}.json', 'w') as f:
+            for item in all_outputs:
+                f.write(json.dumps(item) + '\n')
  
 
 if __name__ == "__main__":
@@ -334,10 +406,11 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", default="", type=str, help="config path")
     parser.add_argument("--batch_size", type=int, default=0, help="batch size")
     parser.add_argument("--port", type=int, default=0, help="batch size")
+    parser.add_argument("--return_seq_num", type=int, default=1, help="number of sequences per sample to return")
     parser.add_argument("--diverse_beam", type=int, default=1, help="batch size")
     parser.add_argument("--seed", type=int, default=1, help="seed")
     parser.add_argument("--out_path", default="", type=str, help="config path")
     args = parser.parse_args()
 
-    local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = 0
     main(local_rank, args)

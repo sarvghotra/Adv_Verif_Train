@@ -31,7 +31,7 @@ python examples/scripts/reward_modeling.py \
 import warnings
 
 import torch
-from datasets import load_dataset, load_from_disk
+from datasets import load_from_disk
 from tqdm import tqdm
 import transformers
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, HfArgumentParser, Trainer
@@ -51,7 +51,7 @@ import torch.nn.functional as F
 from sklearn.metrics import f1_score
 from datasets import Dataset, DatasetDict
 from dataclasses import dataclass, field
-wandb.login(key='WANDB_KEY')
+wandb.login()
 tqdm.pandas()
 
 DEFAULT_PAD_TOKEN = "[PAD]"
@@ -124,8 +124,14 @@ class CustomTrainer(Trainer):
         super().__init__(**kwargs)
         # self.label_weights = label_weights
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         labels = inputs.pop('labels')
+    
+        if self.model_accepts_loss_kwargs:
+            loss_kwargs = {}
+            if num_items_in_batch is not None:
+                loss_kwargs["num_items_in_batch"] = num_items_in_batch
+            inputs = {**inputs, **loss_kwargs}
         
         # forward pass
         outputs = model(**inputs)
@@ -149,17 +155,23 @@ if __name__ == "__main__":
         if model_config.torch_dtype in ["auto", None]
         else getattr(torch, model_config.torch_dtype)
     )
-    quantization_config = get_quantization_config(model_config)
-    model_kwargs = dict(
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-        device_map=get_kbit_device_map() if quantization_config is not None else None,
-        quantization_config=quantization_config,
-    )
+    # quantization_config = get_quantization_config(model_config)
+    # model_kwargs = dict(
+    #     revision=model_config.model_revision,
+    #     trust_remote_code=model_config.trust_remote_code,
+    #     device_map=get_kbit_device_map() if quantization_config is not None else None,
+    #     quantization_config=quantization_config,
+    # )
     tokenizer = AutoTokenizer.from_pretrained(model_config.model_name_or_path, use_fast=True)
+    
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_config.model_name_or_path, num_labels=1, **model_kwargs
-    ).to(torch.bfloat16).to('cuda')
+        model_config.model_name_or_path, 
+        num_labels=1,
+        # num_labels=1, # **model_kwargs
+        trust_remote_code=model_config.trust_remote_code,
+        torch_dtype=torch.bfloat16
+    ).to('cuda')
+    # .to(torch.bfloat16).to('cuda')
 
     # tokenizer.add_special_tokens({'pad_token': DEFAULT_PAD_TOKEN})
     if tokenizer.pad_token is None:
@@ -183,8 +195,11 @@ if __name__ == "__main__":
     raw_datasets = load_from_disk(data_config.data_path)
     tokenized_ds = raw_datasets.map(functools.partial(tokenize_examples, tokenizer=tokenizer), batched=True)
     tokenized_ds = tokenized_ds.with_format('torch')
+
     train_dataset = tokenized_ds["train"]
-    eval_dataset = tokenized_ds["eval"]
+    eval_dataset = {"val_pos": tokenized_ds["val_pos"], "val_neg": tokenized_ds["val_neg"]}
+    # eval_dataset = {"val_pos": tokenized_ds["eval"]}
+
     ################
     # Training
     ################

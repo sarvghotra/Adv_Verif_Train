@@ -166,80 +166,87 @@ def find_most_frequent_answers_with_reward(answer_list, total_reward):
     return final_answers
 
 
-def outcome_reward_model_result(path_list, gsm8k_answers):
-    total_ans = []
-    total_reward = {}
-    total_response = []
-    ans_len = len(gsm8k_answers)
-    for file_path_idx in range(len(path_list)):
-        file_path = path_list[file_path_idx]
+# def outcome_reward_model_result(path_list):
+#     total_ans = []
+#     total_reward = {}
+#     total_response = []
+#     # ans_len = len(gsm8k_answers)
+#     for file_path_idx in range(len(path_list)):
+#         file_path = path_list[file_path_idx]
 
-        ans = []
-        file_response = []
-        with open(file_path) as f:
-            for line_idx, line in enumerate(f.readlines()[:ans_len]):
-                n = extract_answer_number(eval(line)[0][1])
-                file_response.append(eval(line)[0][1])
-                reward = eval(line)[1][0]
-                if file_path_idx in total_reward.keys():
-                    total_reward[file_path_idx].append(reward)
-                else:
-                    total_reward[file_path_idx] = [reward]
-                ans.append(INVALID_ANS if n == None else n)
-        assert len(ans) == len(gsm8k_answers)
-        assert len(file_response) == len(ans)
-        assert len(total_reward[file_path_idx]) == len(ans)
-        total_ans.append(ans) 
-        total_response.append(file_response)
+#         ans = []
+#         file_response = []
+#         with open(file_path) as f:
+#             for line_idx, line in enumerate(f.readlines()):
+                
+#                 n = extract_answer_number(eval(line)[0][1])
+#                 file_response.append(eval(line)[0][1])
+#                 reward = eval(line)[1][0]
 
-    # 假设 total_ans 和 total_reward 已经被正确定义和赋值
-    # total_ans 是一个包含MAX_SEED个子列表的列表，每个子列表包含1319个字符串
-    # total_reward 是一个包含MAX_SEED个子列表的列表，每个子列表包含1319个浮点数
+#                 if file_path_idx in total_reward.keys():
+#                     total_reward[file_path_idx].append(reward)
+#                 else:
+#                     total_reward[file_path_idx] = [reward]
+                
+#                 ans.append(INVALID_ANS if n == None else n)
 
-    # 初始化一个长度为1319的列表，
-    # 用于存储每个位置最大分数对应的答案
-    final_ans = [''] * 1319
+#         # assert len(ans) == len(gsm8k_answers)
+#         assert len(file_response) == len(ans)
+#         assert len(total_reward[file_path_idx]) == len(ans)
+#         total_ans.append(ans) 
+#         total_response.append(file_response)
 
-    # 初始化一个长度为1319的列表，
-    # 用于存储每个位置的最大分数，初始化为非常小的值
-    max_scores = [-float('inf')] * 1319
-    idx_j = ['x'] * 1319
-    invalid_response = []
-    # 遍历每一个位置
-    for i in range(1319):
-        # 遍历所有MAX_SEED个子列表
-        for j in range(MAX_SEED):
-            # 检查当前位置的分数是否大于已记录的最大分数
-            if total_reward[j][i] > max_scores[i] and total_ans[j][i] != INVALID_ANS:
-                # 更新最大分数
-                max_scores[i] = total_reward[j][i]
-                # 更新对应的答案
-                final_ans[i] = total_ans[j][i]
-                idx_j[i] = j
+#     # 假设 total_ans 和 total_reward 已经被正确定义和赋值
+#     # total_ans 是一个包含MAX_SEED个子列表的列表，每个子列表包含1319个字符串
+#     # total_reward 是一个包含MAX_SEED个子列表的列表，每个子列表包含1319个浮点数
 
-    # max_score_ans 现在包含了每个位置得分最高的答案
-    result = []
-    invalid_outputs = []
-    invalid_idx = 0
-    for idx, (y_pred, prompt_answer) in enumerate(zip(final_ans, gsm8k_answers)):
-        # if y_pred == INVALID_ANS:
-            # invalid_idx += 1
-            # continue
-        if y_pred != '' and y_pred != None and y_pred != INVALID_ANS:
-            try:
-                result.append(float(y_pred) == float(prompt_answer))
-            except:
-                pdb.set_trace()
-        else:
-            result.append(False)
-            temp = {'output': y_pred, 'answer': prompt_answer}
-            invalid_outputs.append(temp)
-    acc = sum(result) / len(result)
-    print('len invalid outputs ====', len(invalid_outputs), ', valid_outputs===', invalid_outputs)
-    print('gsm8k length====', len(result), ', gsm8k acc====', acc)
+#     # 初始化一个长度为1319的列表，
+#     # 用于存储每个位置最大分数对应的答案
+#     final_ans = [''] * 1319
 
-    print(invalid_idx)
-    return acc
+#     # 初始化一个长度为1319的列表，
+#     # 用于存储每个位置的最大分数，初始化为非常小的值
+#     max_scores = [-float('inf')] * 1319
+#     idx_j = ['x'] * 1319
+#     invalid_response = []
+#     # 遍历每一个位置
+#     for i in range(1319):
+#         # 遍历所有MAX_SEED个子列表
+#         for j in range(MAX_SEED):
+#             # 检查当前位置的分数是否大于已记录的最大分数
+#             if total_reward[j][i] > max_scores[i] and total_ans[j][i] != INVALID_ANS:
+#                 # 更新最大分数
+#                 max_scores[i] = total_reward[j][i]
+#                 # 更新对应的答案
+#                 final_ans[i] = total_ans[j][i]
+#                 idx_j[i] = j
+
+#     # max_score_ans 现在包含了每个位置得分最高的答案
+#     result = []
+#     invalid_outputs = []
+#     invalid_idx = 0
+#     for idx, (y_pred, prompt_answer) in enumerate(zip(final_ans, gsm8k_answers)):
+#         # if y_pred == INVALID_ANS:
+#             # invalid_idx += 1
+#             # continue
+#         if y_pred != '' and y_pred != None and y_pred != INVALID_ANS:
+#             try:
+#                 result.append(float(y_pred) == float(prompt_answer))
+#             except:
+#                 pdb.set_trace()
+#         else:
+#             result.append(False)
+#             temp = {'output': y_pred, 'answer': prompt_answer}
+#             invalid_outputs.append(temp)
+#     acc = sum(result) / len(result)
+#     print('len invalid outputs ====', len(invalid_outputs), ', valid_outputs===', invalid_outputs)
+#     print('gsm8k length====', len(result), ', gsm8k acc====', acc)
+
+#     print(invalid_idx)
+#     return acc
+
+def best_of_n_orm_result(path_list):
+    
 
 def self_consistency_and_reward(path_list, gsm8k_answers):
     # TODO
@@ -413,18 +420,19 @@ def eval_all(path_list, gsm8k_answers):
 
     return acc
 
-def gsm8k_test(data_path, result_dir, max_seed, mode, filter_path = None):
+def gsm8k_test(result_dir, max_seed, mode, filter_path = None):
     gsm8k_answers = []
     gsm8k_ins = []
-    with open(data_path,"r+", encoding="utf8") as f:
-        for idx, item in enumerate(jsonlines.Reader(f)):
-            temp_instr = item["query"]
-            gsm8k_ins.append(temp_instr)
-            temp_ans = item['response'].split('#### ')[1]
-            temp_ans = int(temp_ans.replace(',', ''))
-            gsm8k_answers.append(temp_ans)
+    
+    # with open(data_path,"r+", encoding="utf8") as f:
+    #     for idx, item in enumerate(jsonlines.Reader(f)):
+    #         temp_instr = item["input"]
+    #         gsm8k_ins.append(temp_instr)
+    #         temp_ans = item['response'].split('#### ')[1]
+    #         temp_ans = int(temp_ans.replace(',', ''))
+    #         gsm8k_answers.append(temp_ans)
 
-    print('lenght ====', len(gsm8k_answers))
+    # print('lenght ====', len(gsm8k_answers))
 
     folder = result_dir
     print(folder)
@@ -444,10 +452,12 @@ def gsm8k_test(data_path, result_dir, max_seed, mode, filter_path = None):
     elif mode == 'text_rm':
         acc = text_rm_filter(path_list, gsm8k_answers, filter_path_list)
     else:
-        acc = outcome_reward_model_result(path_list, gsm8k_answers)
+        acc = outcome_reward_model_result(path_list)    # , gsm8k_answers)
 
 
 
 
 if __name__ == '__main__':
-    gsm8k_test('/test_set_path.jsonl', '/path/to/your/result/dir', MAX_SEED, 'rm')
+    # testset = '/test_set_path.jsonl'
+    gen_dir = '/lustre/fsw/portfolios/llmservice/users/sghotra/models/math_minos/eval/orm_inf2/'
+    gsm8k_test(gen_dir, MAX_SEED, 'rm')
